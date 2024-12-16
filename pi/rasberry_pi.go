@@ -7,10 +7,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/kenshaw/escpos"
 )
+
+const staticToken = "Bearer jUo7WsyYySxi71GwieuFPBfbWj8xR6DaXjUHW7gccT1EaX0DCCm3R3qTmJ3FWh2cFRI7jKOCBodFAvp"
 
 // ReceiptContent represents the receipt data structure
 type ReceiptContent struct {
@@ -163,7 +166,11 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Print the receipt
 	if err := printReceipt(receipt); err != nil {
-		http.Error(w, "Failed to print receipt", http.StatusInternalServerError)
+		if strings.Contains(err.Error(), "/dev/usb/lp0 not found") {
+			http.Error(w, "Printer is offline", http.StatusInternalServerError)
+		} else {
+			http.Error(w, fmt.Sprintf("Failed to print receipt: %v", err.Error()), http.StatusInternalServerError)
+		}
 		log.Printf("Error printing receipt: %v", err)
 		return
 	}
@@ -173,9 +180,24 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Receipt printed successfully!"))
 }
 
+func authenticate(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("x-Authorization")
+		if token != staticToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
 func main() {
 	// Start the HTTP server
-	http.HandleFunc("/", printReceiptHandler)
+	http.HandleFunc("/", authenticate(printReceiptHandler))
 
 	log.Println("Starting server on :8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil))
