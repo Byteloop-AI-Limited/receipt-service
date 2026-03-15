@@ -158,10 +158,15 @@ func printReceipt(receipt ReceiptContent) error {
 		priceStr := formatPrice(itemTotal)
 
 		if hasExtras {
-			// Has modifications — name on own line, extras below, price right-aligned
+			// Has modifications — name + total on same line, @ each price below, then extras
 			printer.SetEmphasize(1)
-			printer.Write(nameLabel + "\n")
+			printLine(printer, nameLabel, priceStr)
 			printer.SetEmphasize(0)
+
+			// @ £x.xx each — only for qty > 1
+			if item.Quantity > 1 {
+				printer.Write(fmt.Sprintf("@ %s each\n", formatPrice(itemPrice)))
+			}
 
 			if hasDescription {
 				printer.Write(fmt.Sprintf("  %s\n", smartWrapText(cleanText(item.Description), 30)))
@@ -171,11 +176,9 @@ func printReceipt(receipt ReceiptContent) error {
 				printer.Write(fmt.Sprintf("  - %s\n", smartWrapText(mod, 28)))
 			}
 
+			// Price right-aligned at end of extras
 			printer.SetAlign("right")
 			printer.Write(priceStr + "\n")
-			if item.Quantity > 1 {
-				printer.Write(fmt.Sprintf("(%s each)\n", formatPrice(itemPrice)))
-			}
 			printer.SetAlign("left")
 
 		} else {
@@ -184,10 +187,9 @@ func printReceipt(receipt ReceiptContent) error {
 			printLine(printer, nameLabel, priceStr)
 			printer.SetEmphasize(0)
 
+			// @ £x.xx each — only for qty > 1
 			if item.Quantity > 1 {
-				printer.SetAlign("right")
-				printer.Write(fmt.Sprintf("(%s each)\n", formatPrice(itemPrice)))
-				printer.SetAlign("left")
+				printer.Write(fmt.Sprintf("@ %s each\n", formatPrice(itemPrice)))
 			}
 		}
 	}
