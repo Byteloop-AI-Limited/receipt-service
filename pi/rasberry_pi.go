@@ -84,7 +84,7 @@ func printReceipt(receipt ReceiptContent) error {
 	// ============================================
 	printer.SetAlign("center")
 	printer.Write(string([]byte{0x1D, 0x21, 0x11})) // Double height and width
-	printer.Write(fmt.Sprintf("%s\n", strings.ToUpper(receipt.Restaurant)))
+	printer.Write(fmt.Sprintf("%s\n", strings.ToUpper(cleanText(receipt.Restaurant))))
 	printer.Write(string([]byte{0x1D, 0x21, 0x00})) // Reset font size
 	printer.Write("\n")
 
@@ -99,7 +99,7 @@ func printReceipt(receipt ReceiptContent) error {
 	printer.SetEmphasize(1) // Bold
 	printer.Write("ORDER #")
 	printer.SetEmphasize(0)
-	printer.Write(fmt.Sprintf(" %s\n", receipt.OrderID))
+	printer.Write(fmt.Sprintf(" %s\n", cleanText(receipt.OrderID)))
 
 	// Date and Time
 	orderTime := time.Now()
@@ -110,7 +110,7 @@ func printReceipt(receipt ReceiptContent) error {
 	// Order Type (Status)
 	printer.SetAlign("center")
 	printer.SetEmphasize(1)
-	statusUpper := strings.ToUpper(receipt.Status)
+	statusUpper := strings.ToUpper(cleanText(receipt.Status))
 	printer.Write(fmt.Sprintf("[ %s ]\n", statusUpper))
 	printer.SetEmphasize(0)
 	printer.Write("\n")
@@ -138,32 +138,33 @@ func printReceipt(receipt ReceiptContent) error {
 		// Item name with quantity
 		printer.SetEmphasize(1) // Bold
 		if item.Quantity > 1 {
-			printer.Write(fmt.Sprintf("%dx %s\n", item.Quantity, item.Name))
+			printer.Write(fmt.Sprintf("%dx %s\n", item.Quantity, cleanText(item.Name)))
 		} else {
-			printer.Write(fmt.Sprintf("%s\n", item.Name))
+			printer.Write(fmt.Sprintf("%s\n", cleanText(item.Name)))
 		}
 		printer.SetEmphasize(0)
 
-		// Item description if available
-		if item.Description != "" {
-			printer.Write(string([]byte{0x1B, 0x45, 0x00})) // Disable bold
-			printer.Write(fmt.Sprintf("  %s\n", wrapText(item.Description, 30)))
+		// Item description if available (only if different from name)
+		if item.Description != "" && !strings.EqualFold(strings.TrimSpace(item.Description), strings.TrimSpace(item.Name)) {
+			desc := cleanText(item.Description)
+			printer.Write(fmt.Sprintf("  %s\n", wrapText(desc, 30)))
 		}
 
-		// Modifications/Add-ons if available
-		if len(item.Modifications) > 0 {
-			for _, mod := range item.Modifications {
-				printer.Write(fmt.Sprintf("  • %s\n", wrapText(mod, 28)))
+		// Process and display modifications/Add-ons (deduplicated and cleaned)
+		mods := deduplicateModifications(item.Modifications, item.Description)
+		if len(mods) > 0 {
+			for _, mod := range mods {
+				printer.Write(fmt.Sprintf("  - %s\n", wrapText(mod, 28)))
 			}
 		}
 
 		// Item price - right aligned
 		printer.SetAlign("right")
 		if item.Quantity > 1 {
-			printer.Write(fmt.Sprintf("\x9C%.2f\n", itemTotal))
-			printer.Write(fmt.Sprintf("(\x9C%.2f each)\n", itemPrice))
+			printer.Write(fmt.Sprintf("%s\n", formatPrice(itemTotal)))
+			printer.Write(fmt.Sprintf("(%s each)\n", formatPrice(itemPrice)))
 		} else {
-			printer.Write(fmt.Sprintf("\x9C%.2f\n", itemPrice))
+			printer.Write(fmt.Sprintf("%s\n", formatPrice(itemPrice)))
 		}
 		printer.SetAlign("left")
 	}
@@ -176,15 +177,13 @@ func printReceipt(receipt ReceiptContent) error {
 	printer.Write("\n")
 
 	printer.SetAlign("right")
-	subtotalAmount := fmt.Sprintf("\x9C%.2f", subtotal)
-	printer.Write(fmt.Sprintf("SUBTOTAL %s\n", subtotalAmount))
+	printer.Write(fmt.Sprintf("SUBTOTAL %s\n", formatPrice(subtotal)))
 	printer.SetAlign("left")
 	printer.Write("\n")
 
 	printer.SetAlign("right")
 	printer.SetEmphasize(1)
-	totalAmount := fmt.Sprintf("\x9C%.2f", parsePrice(receipt.Total))
-	printer.Write(fmt.Sprintf("TOTAL %s\n", totalAmount))
+	printer.Write(fmt.Sprintf("TOTAL %s\n", formatPrice(parsePrice(receipt.Total))))
 	printer.SetEmphasize(0)
 	printer.SetAlign("left")
 
@@ -195,12 +194,12 @@ func printReceipt(receipt ReceiptContent) error {
 	// ============================================
 	// NOTES SECTION
 	// ============================================
-	if receipt.Notes != "" {
+	if receipt.Notes != "" && strings.TrimSpace(receipt.Notes) != "" {
 		printer.SetAlign("left")
 		printer.SetEmphasize(1)
 		printer.Write("NOTES:\n")
 		printer.SetEmphasize(0)
-		printer.Write(wrapText(receipt.Notes, 32))
+		printer.Write(wrapText(cleanText(receipt.Notes), 32))
 		printer.Write("\n\n")
 		printer.Write(strings.Repeat("-", 32) + "\n")
 		printer.Write("\n")
@@ -221,6 +220,72 @@ func printReceipt(receipt ReceiptContent) error {
 	printer.End()
 
 	return nil
+}
+
+// cleanText removes special characters and normalizes text
+func cleanText(text string) string {
+	// Remove common problematic characters and normalize
+	text = strings.TrimSpace(text)
+	// Replace multiple spaces with single space
+	text = strings.Join(strings.Fields(text), " ")
+	// Remove or replace special characters that might cause issues
+	text = strings.ReplaceAll(text, "€", "£")
+	text = strings.ReplaceAll(text, "  ", " ")
+	return text
+}
+
+// deduplicateModifications removes duplicate and redundant modifications
+func deduplicateModifications(mods []string, description string) []string {
+	if len(mods) == 0 {
+		return mods
+	}
+
+	seen := make(map[string]bool)
+	var result []string
+	descLower := strings.ToLower(cleanText(description))
+
+	for _, mod := range mods {
+		cleaned := strings.TrimSpace(cleanText(mod))
+		if cleaned == "" {
+			continue
+		}
+
+		// Skip if already seen
+		lower := strings.ToLower(cleaned)
+		if seen[lower] {
+			continue
+		}
+
+		// Skip very long descriptions that are likely duplicates of item description
+		if len(cleaned) > 80 && strings.Contains(cleaned, ",") {
+			// This is likely a full description, skip it
+			continue
+		}
+
+		// Skip if modification is already covered in the description
+		if descLower != "" {
+			// Check if this modification is essentially the same as description
+			words := strings.Fields(lower)
+			if len(words) > 5 {
+				// For longer modifications, check if most words appear in description
+				matchCount := 0
+				for _, word := range words {
+					if len(word) > 3 && strings.Contains(descLower, word) {
+						matchCount++
+					}
+				}
+				// If more than 60% of words match, it's likely redundant
+				if matchCount > len(words)*6/10 {
+					continue
+				}
+			}
+		}
+
+		seen[lower] = true
+		result = append(result, cleaned)
+	}
+
+	return result
 }
 
 // wrapText wraps text to a maximum line width
@@ -253,6 +318,12 @@ func wrapText(text string, maxWidth int) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// formatPrice formats a price with the £ symbol using ESC/POS encoding
+func formatPrice(price float64) string {
+	// Use \x9C which is the £ symbol in Code Page 858 (CP858)
+	return fmt.Sprintf("\x9C%.2f", price)
 }
 
 // Helper function to parse price strings into float64
