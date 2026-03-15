@@ -61,8 +61,25 @@ func formatPrice(price float64) string {
 	return fmt.Sprintf("%s%.2f", poundSign(), price)
 }
 
-// printLine prints label on the left and value on the right on the same line
-// e.g. "Fries                   £2.50"
+// printItemLine prints name left and price right on same line if they fit.
+// If name is too long, prints name on its own line then price right-aligned below.
+func printItemLine(printer *escpos.Escpos, name, price string) {
+	// Need at least 1 space between name and price
+	if len(name)+1+len(price) <= printerWidth {
+		spaces := printerWidth - len(name) - len(price)
+		printer.Write(fmt.Sprintf("%s%s%s\n", name, strings.Repeat(" ", spaces), price))
+	} else {
+		// Name too long — name on its own line, price right-aligned below
+		printer.Write(name + "\n")
+		spaces := printerWidth - len(price)
+		if spaces < 0 {
+			spaces = 0
+		}
+		printer.Write(fmt.Sprintf("%s%s\n", strings.Repeat(" ", spaces), price))
+	}
+}
+
+// printLine prints label left and value right — used for SUBTOTAL/TOTAL
 func printLine(printer *escpos.Escpos, label, value string) {
 	spaces := printerWidth - len(label) - len(value)
 	if spaces < 1 {
@@ -157,39 +174,23 @@ func printReceipt(receipt ReceiptContent) error {
 
 		priceStr := formatPrice(itemTotal)
 
+		// Always print name and price — smart layout handles long names
+		printer.SetEmphasize(1)
+		printItemLine(printer, nameLabel, priceStr)
+		printer.SetEmphasize(0)
+
+		// @ each price for qty > 1
+		if item.Quantity > 1 {
+			printer.Write(fmt.Sprintf("@ %s each\n", formatPrice(itemPrice)))
+		}
+
+		// Extras below — no duplicate price
 		if hasExtras {
-			// Has modifications — name + total on same line, @ each price below, then extras
-			printer.SetEmphasize(1)
-			printLine(printer, nameLabel, priceStr)
-			printer.SetEmphasize(0)
-
-			// @ £x.xx each — only for qty > 1
-			if item.Quantity > 1 {
-				printer.Write(fmt.Sprintf("@ %s each\n", formatPrice(itemPrice)))
-			}
-
 			if hasDescription {
 				printer.Write(fmt.Sprintf("  %s\n", smartWrapText(cleanText(item.Description), 30)))
 			}
-
 			for _, mod := range mods {
 				printer.Write(fmt.Sprintf("  - %s\n", smartWrapText(mod, 28)))
-			}
-
-			// Price right-aligned at end of extras
-			printer.SetAlign("right")
-			printer.Write(priceStr + "\n")
-			printer.SetAlign("left")
-
-		} else {
-			// No modifications — name and price on SAME line
-			printer.SetEmphasize(1)
-			printLine(printer, nameLabel, priceStr)
-			printer.SetEmphasize(0)
-
-			// @ £x.xx each — only for qty > 1
-			if item.Quantity > 1 {
-				printer.Write(fmt.Sprintf("@ %s each\n", formatPrice(itemPrice)))
 			}
 		}
 	}
