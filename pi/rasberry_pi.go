@@ -79,13 +79,19 @@ func printReceipt(receipt ReceiptContent) error {
 	// Set character encoding to Code Page 858 for '£' symbol
 	printer.Write(string([]byte{0x1B, 0x74, 19}))
 
+	// Ensure we're using the correct encoding for £ symbol
+	// Try alternative: Code Page 437 (IBM PC) which also has £ at 0x9C
+	// But CP858 is preferred for better character support
+
 	// ============================================
 	// HEADER SECTION
 	// ============================================
 	printer.SetAlign("center")
+	printer.SetEmphasize(1)                         // Bold
 	printer.Write(string([]byte{0x1D, 0x21, 0x11})) // Double height and width
 	printer.Write(fmt.Sprintf("%s\n", strings.ToUpper(cleanText(receipt.Restaurant))))
 	printer.Write(string([]byte{0x1D, 0x21, 0x00})) // Reset font size
+	printer.SetEmphasize(0)                         // Reset bold
 	printer.Write("\n")
 
 	// Separator line
@@ -107,12 +113,14 @@ func printReceipt(receipt ReceiptContent) error {
 	printer.Write(fmt.Sprintf("%s\n", orderTime.Format("15:04")))
 	printer.Write("\n")
 
-	// Order Type (Status)
+	// Order Type (Status) - Bold and Large
 	printer.SetAlign("center")
-	printer.SetEmphasize(1)
+	printer.SetEmphasize(1)                         // Bold
+	printer.Write(string([]byte{0x1D, 0x21, 0x11})) // Double height and width
 	statusUpper := strings.ToUpper(cleanText(receipt.Status))
-	printer.Write(fmt.Sprintf("[ %s ]\n", statusUpper))
-	printer.SetEmphasize(0)
+	printer.Write(fmt.Sprintf("%s\n", statusUpper))
+	printer.Write(string([]byte{0x1D, 0x21, 0x00})) // Reset font size
+	printer.SetEmphasize(0)                         // Reset bold
 	printer.Write("\n")
 
 	// Separator
@@ -144,17 +152,20 @@ func printReceipt(receipt ReceiptContent) error {
 		}
 		printer.SetEmphasize(0)
 
-		// Item description if available (only if different from name)
+		// Item description if available (only if different from name and not redundant with modifications)
 		if item.Description != "" && !strings.EqualFold(strings.TrimSpace(item.Description), strings.TrimSpace(item.Name)) {
 			desc := cleanText(item.Description)
-			printer.Write(fmt.Sprintf("  %s\n", wrapText(desc, 30)))
+			// Only show description if it's not already covered by modifications
+			if !isRedundantDescription(desc, item.Modifications) {
+				printer.Write(fmt.Sprintf("  %s\n", smartWrapText(desc, 30)))
+			}
 		}
 
 		// Process and display modifications/Add-ons (deduplicated and cleaned)
 		mods := deduplicateModifications(item.Modifications, item.Description)
 		if len(mods) > 0 {
 			for _, mod := range mods {
-				printer.Write(fmt.Sprintf("  - %s\n", wrapText(mod, 28)))
+				printer.Write(fmt.Sprintf("  - %s\n", smartWrapText(mod, 28)))
 			}
 		}
 
@@ -256,9 +267,10 @@ func deduplicateModifications(mods []string, description string) []string {
 			continue
 		}
 
-		// Skip very long descriptions that are likely duplicates of item description
-		if len(cleaned) > 80 && strings.Contains(cleaned, ",") {
-			// This is likely a full description, skip it
+		// Skip very long comma-separated lists (likely full item descriptions)
+		// Lowered threshold from 80 to 60 characters
+		if len(cleaned) > 60 && strings.Count(cleaned, ",") >= 3 {
+			// This is likely a full description list, skip it
 			continue
 		}
 
@@ -266,19 +278,24 @@ func deduplicateModifications(mods []string, description string) []string {
 		if descLower != "" {
 			// Check if this modification is essentially the same as description
 			words := strings.Fields(lower)
-			if len(words) > 5 {
+			if len(words) > 4 {
 				// For longer modifications, check if most words appear in description
 				matchCount := 0
 				for _, word := range words {
-					if len(word) > 3 && strings.Contains(descLower, word) {
+					if len(word) > 2 && strings.Contains(descLower, word) {
 						matchCount++
 					}
 				}
-				// If more than 60% of words match, it's likely redundant
-				if matchCount > len(words)*6/10 {
+				// If more than 50% of words match, it's likely redundant
+				if matchCount > len(words)/2 {
 					continue
 				}
 			}
+		}
+
+		// Skip modifications that are just lists of items already in description
+		if isItemList(mod, description) {
+			continue
 		}
 
 		seen[lower] = true
@@ -288,8 +305,49 @@ func deduplicateModifications(mods []string, description string) []string {
 	return result
 }
 
-// wrapText wraps text to a maximum line width
-func wrapText(text string, maxWidth int) string {
+// isItemList checks if a modification is just a list of items already in description
+func isItemList(mod, description string) bool {
+	modLower := strings.ToLower(mod)
+	descLower := strings.ToLower(description)
+
+	// If modification has many commas and most content matches description
+	if strings.Count(modLower, ",") >= 2 {
+		modWords := strings.Fields(modLower)
+		matches := 0
+		for _, word := range modWords {
+			if len(word) > 2 && strings.Contains(descLower, word) {
+				matches++
+			}
+		}
+		// If 70% of words match, it's likely a redundant list
+		return matches > len(modWords)*7/10
+	}
+	return false
+}
+
+// isRedundantDescription checks if description is redundant with modifications
+func isRedundantDescription(description string, modifications []string) bool {
+	if len(modifications) == 0 {
+		return false
+	}
+
+	descLower := strings.ToLower(description)
+	allMods := strings.ToLower(strings.Join(modifications, " "))
+
+	// If description is very similar to combined modifications, it's redundant
+	descWords := strings.Fields(descLower)
+	matches := 0
+	for _, word := range descWords {
+		if len(word) > 2 && strings.Contains(allMods, word) {
+			matches++
+		}
+	}
+	// If 70% of description words are in modifications, it's redundant
+	return matches > len(descWords)*7/10
+}
+
+// smartWrapText wraps text intelligently, trying to keep phrases together
+func smartWrapText(text string, maxWidth int) string {
 	words := strings.Fields(text)
 	if len(words) == 0 {
 		return text
@@ -298,31 +356,49 @@ func wrapText(text string, maxWidth int) string {
 	var lines []string
 	currentLine := ""
 
-	for _, word := range words {
-		if len(currentLine)+len(word)+1 <= maxWidth {
-			if currentLine != "" {
-				currentLine += " " + word
-			} else {
-				currentLine = word
-			}
+	for i, word := range words {
+		// Check if adding this word would exceed the limit
+		testLine := currentLine
+		if testLine != "" {
+			testLine += " " + word
 		} else {
+			testLine = word
+		}
+
+		if len(testLine) <= maxWidth {
+			currentLine = testLine
+		} else {
+			// Current line is full, start a new one
 			if currentLine != "" {
 				lines = append(lines, currentLine)
 			}
 			currentLine = word
 		}
+
+		// If we're at the last word, add it
+		if i == len(words)-1 && currentLine != "" {
+			lines = append(lines, currentLine)
+		}
 	}
 
-	if currentLine != "" {
-		lines = append(lines, currentLine)
+	if len(lines) == 0 && currentLine != "" {
+		return currentLine
 	}
 
 	return strings.Join(lines, "\n")
 }
 
+// wrapText wraps text to a maximum line width (kept for backward compatibility)
+func wrapText(text string, maxWidth int) string {
+	return smartWrapText(text, maxWidth)
+}
+
 // formatPrice formats a price with the £ symbol using ESC/POS encoding
 func formatPrice(price float64) string {
 	// Use \x9C which is the £ symbol in Code Page 858 (CP858)
+	// This should work with most ESC/POS printers when CP858 is set
+	// Alternative: Use the actual £ character if printer supports UTF-8
+	// But \x9C is more reliable for thermal printers
 	return fmt.Sprintf("\x9C%.2f", price)
 }
 
