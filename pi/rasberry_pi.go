@@ -27,9 +27,11 @@ type ReceiptContent struct {
 
 // Item represents each item in the receipt
 type Item struct {
-	Name     string `json:"name"`
-	Price    string `json:"price"`    // Price in pounds
-	Quantity int    `json:"quantity"` // Quantity of the item
+	Name          string   `json:"name"`
+	Price         string   `json:"price"`         // Price in pounds
+	Quantity      int      `json:"quantity"`      // Quantity of the item
+	Description   string   `json:"description"`   // Optional: Item description/summary
+	Modifications []string `json:"modifications"` // Optional: List of modifications/add-ons
 }
 
 func fixPrinterPermissions() error {
@@ -61,7 +63,7 @@ func printReceipt(receipt ReceiptContent) error {
 	}
 
 	// Open the printer device
-	devicePath := "/dev/usb/lp0" // Replace with your printer's device path
+	devicePath := "/dev/usb/lp0"
 	file, err := os.OpenFile(devicePath, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("failed to open printer: %v", err)
@@ -77,75 +79,180 @@ func printReceipt(receipt ReceiptContent) error {
 	// Set character encoding to Code Page 858 for '£' symbol
 	printer.Write(string([]byte{0x1B, 0x74, 19}))
 
-	// Header: Restaurant name in bold, centered
+	// ============================================
+	// HEADER SECTION
+	// ============================================
 	printer.SetAlign("center")
-	printer.Write(string([]byte{0x1D, 0x21, 0x01})) // Larger font for header
-	printer.Write(fmt.Sprintf("%s\n", receipt.Restaurant))
+	printer.Write(string([]byte{0x1D, 0x21, 0x11})) // Double height and width
+	printer.Write(fmt.Sprintf("%s\n", strings.ToUpper(receipt.Restaurant)))
 	printer.Write(string([]byte{0x1D, 0x21, 0x00})) // Reset font size
-	printer.Write("--------------------------------\n")
+	printer.Write("\n")
 
-	// Order ID (Centered and Adjusted Font)
+	// Separator line
+	printer.Write(strings.Repeat("=", 32) + "\n")
+	printer.Write("\n")
+
+	// ============================================
+	// ORDER INFORMATION
+	// ============================================
+	printer.SetAlign("left")
+	printer.SetEmphasize(1) // Bold
+	printer.Write("ORDER #")
+	printer.SetEmphasize(0)
+	printer.Write(fmt.Sprintf(" %s\n", receipt.OrderID))
+
+	// Date and Time
+	orderTime := time.Now()
+	printer.Write(fmt.Sprintf("%s\n", orderTime.Format("Mon 02 Jan 2006")))
+	printer.Write(fmt.Sprintf("%s\n", orderTime.Format("15:04")))
+	printer.Write("\n")
+
+	// Order Type (Status)
 	printer.SetAlign("center")
-	printer.Write(string([]byte{0x1D, 0x21, 0x00})) // Reset to default font size
-	printer.Write(fmt.Sprintf("Order ID: %s\n", receipt.OrderID))
-	printer.Write("--------------------------------\n")
+	printer.SetEmphasize(1)
+	statusUpper := strings.ToUpper(receipt.Status)
+	printer.Write(fmt.Sprintf("[ %s ]\n", statusUpper))
+	printer.SetEmphasize(0)
+	printer.Write("\n")
 
-	// Main Content with Center Alignment
-	printer.Write(string([]byte{0x1D, 0x21, 0x00})) // Default font size
+	// Separator
+	printer.Write(strings.Repeat("-", 32) + "\n")
+	printer.Write("\n")
 
-	// Item Table Header
-	printer.Write(fmt.Sprintf("%-20s %5s %10s\n", "Item", "Qty", "Amount")) // Adjust column widths
-	printer.Write("--------------------------------\n")
+	// ============================================
+	// ITEMS SECTION
+	// ============================================
+	printer.SetAlign("left")
 
-	// Items Table Rows
-	for _, item := range receipt.Items {
-		itemName := truncate(item.Name, 20)                       // Ensure item name fits the column width
-		amount := fmt.Sprintf("\x9C%.2f", parsePrice(item.Price)) // Use \x9C for £
-		printer.Write(fmt.Sprintf("%-20s %5d %10s\n", itemName, item.Quantity, amount))
+	var subtotal float64 = 0
+
+	for i, item := range receipt.Items {
+		if i > 0 {
+			printer.Write("\n")
+		}
+
+		itemPrice := parsePrice(item.Price)
+		itemTotal := itemPrice * float64(item.Quantity)
+		subtotal += itemTotal
+
+		// Item name with quantity
+		printer.SetEmphasize(1) // Bold
+		if item.Quantity > 1 {
+			printer.Write(fmt.Sprintf("%dx %s\n", item.Quantity, item.Name))
+		} else {
+			printer.Write(fmt.Sprintf("%s\n", item.Name))
+		}
+		printer.SetEmphasize(0)
+
+		// Item description if available
+		if item.Description != "" {
+			printer.Write(string([]byte{0x1B, 0x45, 0x00})) // Disable bold
+			printer.Write(fmt.Sprintf("  %s\n", wrapText(item.Description, 30)))
+		}
+
+		// Modifications/Add-ons if available
+		if len(item.Modifications) > 0 {
+			for _, mod := range item.Modifications {
+				printer.Write(fmt.Sprintf("  • %s\n", wrapText(mod, 28)))
+			}
+		}
+
+		// Item price - right aligned
+		printer.SetAlign("right")
+		if item.Quantity > 1 {
+			printer.Write(fmt.Sprintf("\x9C%.2f\n", itemTotal))
+			printer.Write(fmt.Sprintf("(\x9C%.2f each)\n", itemPrice))
+		} else {
+			printer.Write(fmt.Sprintf("\x9C%.2f\n", itemPrice))
+		}
+		printer.SetAlign("left")
 	}
-	printer.Write("--------------------------------\n")
 
-	// Total Amount
-	totalAmount := fmt.Sprintf("\x9C%.2f", parsePrice(receipt.Total)) // Use \x9C for £
-	printer.Write(fmt.Sprintf("%-20s %15s\n", "Total:", totalAmount))
-	printer.Write("--------------------------------\n")
+	// ============================================
+	// TOTALS SECTION
+	// ============================================
+	printer.Write("\n")
+	printer.Write(strings.Repeat("-", 32) + "\n")
+	printer.Write("\n")
 
-	// Notes
-	printer.Write(fmt.Sprintf("Notes: %s\n", receipt.Notes))
-	printer.Write("--------------------------------\n")
+	printer.SetAlign("right")
+	subtotalAmount := fmt.Sprintf("\x9C%.2f", subtotal)
+	printer.Write(fmt.Sprintf("SUBTOTAL %s\n", subtotalAmount))
+	printer.SetAlign("left")
+	printer.Write("\n")
 
-	// Status (Bold and Centered)
+	printer.SetAlign("right")
+	printer.SetEmphasize(1)
+	totalAmount := fmt.Sprintf("\x9C%.2f", parsePrice(receipt.Total))
+	printer.Write(fmt.Sprintf("TOTAL %s\n", totalAmount))
+	printer.SetEmphasize(0)
+	printer.SetAlign("left")
+
+	printer.Write("\n")
+	printer.Write(strings.Repeat("=", 32) + "\n")
+	printer.Write("\n")
+
+	// ============================================
+	// NOTES SECTION
+	// ============================================
+	if receipt.Notes != "" {
+		printer.SetAlign("left")
+		printer.SetEmphasize(1)
+		printer.Write("NOTES:\n")
+		printer.SetEmphasize(0)
+		printer.Write(wrapText(receipt.Notes, 32))
+		printer.Write("\n\n")
+		printer.Write(strings.Repeat("-", 32) + "\n")
+		printer.Write("\n")
+	}
+
+	// ============================================
+	// FOOTER SECTION
+	// ============================================
 	printer.SetAlign("center")
-	printer.SetEmphasize(1) // Bold text
-	printer.Write(fmt.Sprintf("Status: %s\n", receipt.Status))
-	printer.SetEmphasize(0) // Reset emphasis
-	printer.Write("--------------------------------\n")
-
-	// Submitted Time (Current Date and Time)
-	submittedTime := time.Now().Format("2006-01-02 15:04:05") // Format: YYYY-MM-DD HH:MM:SS
-	printer.Write(fmt.Sprintf("Submitted: %s\n", submittedTime))
-	printer.Write("--------------------------------\n")
-
-	// Footer: Thank you message
-	printer.SetAlign("center")
-	printer.Write(string([]byte{0x1D, 0x21, 0x01})) // Larger font for footer
 	printer.Write("Thank you for your order!\n")
-	printer.Write(string([]byte{0x1D, 0x21, 0x00})) // Reset font size
+	printer.Write("\n")
+	printer.Write("We hope to see you again soon\n")
+	printer.Write("\n")
 
 	// Feed and Cut
-	printer.FormfeedN(3) // Feed paper
+	printer.FormfeedN(2)
 	printer.Cut()
 	printer.End()
 
 	return nil
 }
 
-// Truncate a string to a maximum length with ellipsis
-func truncate(input string, maxLength int) string {
-	if len(input) > maxLength {
-		return input[:maxLength-3] + "..." // Add ellipsis for overflow
+// wrapText wraps text to a maximum line width
+func wrapText(text string, maxWidth int) string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return text
 	}
-	return input
+
+	var lines []string
+	currentLine := ""
+
+	for _, word := range words {
+		if len(currentLine)+len(word)+1 <= maxWidth {
+			if currentLine != "" {
+				currentLine += " " + word
+			} else {
+				currentLine = word
+			}
+		} else {
+			if currentLine != "" {
+				lines = append(lines, currentLine)
+			}
+			currentLine = word
+		}
+	}
+
+	if currentLine != "" {
+		lines = append(lines, currentLine)
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // Helper function to parse price strings into float64
