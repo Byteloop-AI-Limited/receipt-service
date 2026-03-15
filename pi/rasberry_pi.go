@@ -13,9 +13,11 @@ import (
 	"github.com/kenshaw/escpos"
 )
 
-const staticToken = "Bearer jUo7WsyYySxi71GwieuFPBfbWj8xR6DaXjUHW7gccT1EaX0DCCm3R3qTmJ3FWh2cFRI7jKOCBodFAvp"
+const (
+	staticToken  = "Bearer jUo7WsyYySxi71GwieuFPBfbWj8xR6DaXjUHW7gccT1EaX0DCCm3R3qTmJ3FWh2cFRI7jKOCBodFAvp"
+	printerWidth = 32
+)
 
-// ReceiptContent represents the receipt data structure
 type ReceiptContent struct {
 	OrderID    string `json:"order_id"`
 	Restaurant string `json:"restaurant"`
@@ -25,7 +27,6 @@ type ReceiptContent struct {
 	Notes      string `json:"notes"`
 }
 
-// Item represents each item in the receipt
 type Item struct {
 	Name          string   `json:"name"`
 	Price         string   `json:"price"`
@@ -52,16 +53,22 @@ func fixPrinterPermissions() error {
 	return nil
 }
 
-// poundSign returns the correct byte sequence for £ on this printer.
-// We try Code Page 858 (0x13) where £ lives at 0x9C.
-// If your printer still shows wrong character, swap to tryCP437 below.
 func poundSign() string {
 	return "\x9C"
 }
 
-// formatPrice formats a price with the £ symbol
 func formatPrice(price float64) string {
 	return fmt.Sprintf("%s%.2f", poundSign(), price)
+}
+
+// printLine prints label on the left and value on the right on the same line
+// e.g. "Fries                   £2.50"
+func printLine(printer *escpos.Escpos, label, value string) {
+	spaces := printerWidth - len(label) - len(value)
+	if spaces < 1 {
+		spaces = 1
+	}
+	printer.Write(fmt.Sprintf("%s%s%s\n", label, strings.Repeat(" ", spaces), value))
 }
 
 func printReceipt(receipt ReceiptContent) error {
@@ -79,11 +86,7 @@ func printReceipt(receipt ReceiptContent) error {
 	printer := escpos.New(file)
 	printer.Init()
 
-	// ── Code page selection ──────────────────────────────────────────────
-	// ESC t 0x00 = CP437 (USA)         £ at 0x9C ✓
-	// ESC t 0x02 = CP850 (Multilingual) £ at 0x9C ✓
-	// ESC t 0x13 = CP858               £ at 0x9C ✓
-	// Try CP437 first — most widely supported on thermal printers
+	// CP437 — most reliable for £ on thermal printers
 	printer.Write(string([]byte{0x1B, 0x74, 0x00}))
 
 	// ============================================
@@ -91,13 +94,12 @@ func printReceipt(receipt ReceiptContent) error {
 	// ============================================
 	printer.SetAlign("center")
 	printer.SetEmphasize(1)
-	printer.Write(string([]byte{0x1D, 0x21, 0x11})) // Double height + width
+	printer.Write(string([]byte{0x1D, 0x21, 0x11}))
 	printer.Write(fmt.Sprintf("%s\n", strings.ToUpper(cleanText(receipt.Restaurant))))
-	printer.Write(string([]byte{0x1D, 0x21, 0x00})) // Reset size
+	printer.Write(string([]byte{0x1D, 0x21, 0x00}))
 	printer.SetEmphasize(0)
 	printer.Write("\n")
-
-	printer.Write(strings.Repeat("=", 32) + "\n")
+	printer.Write(strings.Repeat("=", printerWidth) + "\n")
 	printer.Write("\n")
 
 	// ============================================
@@ -107,7 +109,6 @@ func printReceipt(receipt ReceiptContent) error {
 	printer.SetEmphasize(1)
 	printer.Write(fmt.Sprintf("ORDER # %s\n", cleanText(receipt.OrderID)))
 	printer.SetEmphasize(0)
-
 	orderTime := time.Now()
 	printer.Write(fmt.Sprintf("%s\n", orderTime.Format("Mon 02 Jan 2006")))
 	printer.Write(fmt.Sprintf("%s\n", orderTime.Format("15:04")))
@@ -121,8 +122,7 @@ func printReceipt(receipt ReceiptContent) error {
 	printer.Write(string([]byte{0x1D, 0x21, 0x00}))
 	printer.SetEmphasize(0)
 	printer.Write("\n")
-
-	printer.Write(strings.Repeat("-", 32) + "\n")
+	printer.Write(strings.Repeat("-", printerWidth) + "\n")
 	printer.Write("\n")
 
 	// ============================================
@@ -140,58 +140,73 @@ func printReceipt(receipt ReceiptContent) error {
 		itemTotal := itemPrice * float64(item.Quantity)
 		subtotal += itemTotal
 
-		// Item name
-		printer.SetEmphasize(1)
-		if item.Quantity > 1 {
-			printer.Write(fmt.Sprintf("%dx %s\n", item.Quantity, cleanText(item.Name)))
-		} else {
-			printer.Write(fmt.Sprintf("%s\n", cleanText(item.Name)))
-		}
-		printer.SetEmphasize(0)
+		mods := deduplicateModifications(item.Modifications, item.Description)
 
-		// Description (only if not redundant)
-		if item.Description != "" &&
-			!strings.EqualFold(strings.TrimSpace(item.Description), strings.TrimSpace(item.Name)) {
-			desc := cleanText(item.Description)
-			if !isRedundantDescription(desc, item.Modifications) {
-				printer.Write(fmt.Sprintf("  %s\n", smartWrapText(desc, 30)))
+		hasDescription := item.Description != "" &&
+			!strings.EqualFold(strings.TrimSpace(item.Description), strings.TrimSpace(item.Name)) &&
+			!isRedundantDescription(cleanText(item.Description), item.Modifications)
+
+		hasExtras := len(mods) > 0 || hasDescription
+
+		var nameLabel string
+		if item.Quantity > 1 {
+			nameLabel = fmt.Sprintf("%dx %s", item.Quantity, cleanText(item.Name))
+		} else {
+			nameLabel = cleanText(item.Name)
+		}
+
+		priceStr := formatPrice(itemTotal)
+
+		if hasExtras {
+			// Has modifications — name on own line, extras below, price right-aligned
+			printer.SetEmphasize(1)
+			printer.Write(nameLabel + "\n")
+			printer.SetEmphasize(0)
+
+			if hasDescription {
+				printer.Write(fmt.Sprintf("  %s\n", smartWrapText(cleanText(item.Description), 30)))
+			}
+
+			for _, mod := range mods {
+				printer.Write(fmt.Sprintf("  - %s\n", smartWrapText(mod, 28)))
+			}
+
+			printer.SetAlign("right")
+			printer.Write(priceStr + "\n")
+			if item.Quantity > 1 {
+				printer.Write(fmt.Sprintf("(%s each)\n", formatPrice(itemPrice)))
+			}
+			printer.SetAlign("left")
+
+		} else {
+			// No modifications — name and price on SAME line
+			printer.SetEmphasize(1)
+			printLine(printer, nameLabel, priceStr)
+			printer.SetEmphasize(0)
+
+			if item.Quantity > 1 {
+				printer.SetAlign("right")
+				printer.Write(fmt.Sprintf("(%s each)\n", formatPrice(itemPrice)))
+				printer.SetAlign("left")
 			}
 		}
-
-		// Modifications
-		mods := deduplicateModifications(item.Modifications, item.Description)
-		for _, mod := range mods {
-			printer.Write(fmt.Sprintf("  - %s\n", smartWrapText(mod, 28)))
-		}
-
-		// Price — right aligned
-		printer.SetAlign("right")
-		if item.Quantity > 1 {
-			printer.Write(fmt.Sprintf("%s\n", formatPrice(itemTotal)))
-			printer.Write(fmt.Sprintf("(%s each)\n", formatPrice(itemPrice)))
-		} else {
-			printer.Write(fmt.Sprintf("%s\n", formatPrice(itemPrice)))
-		}
-		printer.SetAlign("left")
 	}
 
 	// ============================================
 	// TOTALS
 	// ============================================
 	printer.Write("\n")
-	printer.Write(strings.Repeat("-", 32) + "\n")
+	printer.Write(strings.Repeat("-", printerWidth) + "\n")
 	printer.Write("\n")
 
-	printer.SetAlign("right")
-	printer.Write(fmt.Sprintf("SUBTOTAL  %s\n", formatPrice(subtotal)))
+	printLine(printer, "SUBTOTAL", formatPrice(subtotal))
 	printer.Write("\n")
 	printer.SetEmphasize(1)
-	printer.Write(fmt.Sprintf("TOTAL     %s\n", formatPrice(parsePrice(receipt.Total))))
+	printLine(printer, "TOTAL", formatPrice(parsePrice(receipt.Total)))
 	printer.SetEmphasize(0)
-	printer.SetAlign("left")
 
 	printer.Write("\n")
-	printer.Write(strings.Repeat("=", 32) + "\n")
+	printer.Write(strings.Repeat("=", printerWidth) + "\n")
 	printer.Write("\n")
 
 	// ============================================
@@ -201,9 +216,9 @@ func printReceipt(receipt ReceiptContent) error {
 		printer.SetEmphasize(1)
 		printer.Write("NOTES:\n")
 		printer.SetEmphasize(0)
-		printer.Write(wrapText(cleanText(receipt.Notes), 32))
+		printer.Write(wrapText(cleanText(receipt.Notes), printerWidth))
 		printer.Write("\n\n")
-		printer.Write(strings.Repeat("-", 32) + "\n")
+		printer.Write(strings.Repeat("-", printerWidth) + "\n")
 		printer.Write("\n")
 	}
 
@@ -223,12 +238,9 @@ func printReceipt(receipt ReceiptContent) error {
 	return nil
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
 func cleanText(text string) string {
 	text = strings.TrimSpace(text)
 	text = strings.Join(strings.Fields(text), " ")
-	// Keep £ as-is; replace € with £
 	text = strings.ReplaceAll(text, "€", poundSign())
 	return text
 }
@@ -240,7 +252,6 @@ func deduplicateModifications(mods []string, description string) []string {
 	seen := make(map[string]bool)
 	var result []string
 	descLower := strings.ToLower(cleanText(description))
-
 	for _, mod := range mods {
 		cleaned := strings.TrimSpace(cleanText(mod))
 		if cleaned == "" {
@@ -349,8 +360,6 @@ func parsePrice(priceStr string) float64 {
 	fmt.Sscanf(priceStr, "%f", &price)
 	return price
 }
-
-// ── HTTP handlers ─────────────────────────────────────────────────────────────
 
 func printReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	var receipt ReceiptContent
