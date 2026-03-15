@@ -131,7 +131,7 @@ func printReceipt(receipt ReceiptContent) error {
 		printer.SetAlign("center")
 		printer.SetEmphasize(1)
 		printer.Write(string([]byte{0x1D, 0x21, 0x11}))
-		printer.Write(fmt.Sprintf("RIDER: %s\n", strings.ToUpper(cleanText(receipt.RiderCode))))
+		printer.Write(fmt.Sprintf("RIDER CODE: %s\n", strings.ToUpper(cleanText(receipt.RiderCode))))
 		printer.Write(string([]byte{0x1D, 0x21, 0x00}))
 		printer.SetEmphasize(0)
 		printer.Write("\n")
